@@ -1,6 +1,8 @@
 import * as XLSX from 'xlsx';
 import { EvidenceData } from './types';
 
+const xlsxLib = (XLSX as any).default || XLSX;
+
 export function exportEvidenceToCsv(evidence: EvidenceData): string {
   const headers = ['Vendor Name', 'Amount (INR)', 'Transaction Date', 'Category', 'Status'];
   const rows = evidence.supporting_records.map((r) => [
@@ -43,12 +45,12 @@ export function exportEvidenceToExcel(evidence: EvidenceData): Buffer {
 
   const wb = XLSX.utils.book_new();
 
-  const summarySheet = XLSX.utils.json_to_sheet(summaryData);
-  XLSX.utils.book_append_sheet(wb, summarySheet, 'Audit Summary');
+  const summarySheet = xlsxLib.utils.json_to_sheet(summaryData);
+  xlsxLib.utils.book_append_sheet(wb, summarySheet, 'Audit Summary');
 
-  const recordsSheet = XLSX.utils.json_to_sheet(records);
-  XLSX.utils.book_append_sheet(wb, recordsSheet, 'Supporting Records');
+  const recordsSheet = xlsxLib.utils.json_to_sheet(records);
+  xlsxLib.utils.book_append_sheet(wb, recordsSheet, 'Supporting Records');
 
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const buf = xlsxLib.write(wb, { type: 'buffer', bookType: 'xlsx' });
   return buf as Buffer;
 }

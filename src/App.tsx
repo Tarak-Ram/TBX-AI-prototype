@@ -47,7 +47,7 @@ export default function App() {
       {
         id: 'welcome',
         sender: 'assistant',
-        text: 'Welcome to the TBX Finance Assistant Bento Workspace. All calculations are executed directly in DuckDB with zero LLM hallucination and 100% mathematical auditability. What financial metrics or vendor payouts would you like to explore?',
+        text: 'Welcome to the TBX Finance Assistant Bento Workspace. All calculations are executed directly in DuckDB with zero LLM hallucination and 100% mathematical auditability. Please upload your financial files (CSV, Excel) to begin querying your data!',
         timestamp: new Date().toISOString(),
       },
     ]);
@@ -191,17 +191,34 @@ export default function App() {
             </div>
             <div>
               <div className="text-xl font-extrabold text-white font-mono tracking-tight mb-1">
-                {health ? health.active_records.toLocaleString() : '—'}{' '}
-                <span className="text-xs font-normal text-slate-400 font-sans">Rows</span>
+                {health && health.active_records > 0 ? (
+                  <>
+                    {health.active_records.toLocaleString()}{' '}
+                    <span className="text-xs font-normal text-slate-400 font-sans">Rows</span>
+                  </>
+                ) : (
+                  <span className="text-amber-400 text-base font-sans font-semibold">No Data</span>
+                )}
               </div>
               <div className="flex items-center gap-1.5 text-xs text-slate-400">
-                <span className="font-semibold text-slate-300 truncate max-w-[120px]">
-                  {health?.active_dataset || 'finance_data'}
-                </span>
-                <span className="text-indigo-400 font-mono text-[11px]">
-                  v{health?.active_version || 1}
-                </span>
-                <span>• ₹ INR</span>
+                {health && health.active_records > 0 ? (
+                  <>
+                    <span className="font-semibold text-slate-300 truncate max-w-[120px]">
+                      {health.active_dataset}
+                    </span>
+                    <span className="text-indigo-400 font-mono text-[11px]">
+                      v{health?.active_version || 1}
+                    </span>
+                    <span>• ₹ INR</span>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => setIsUploadModalOpen(true)}
+                    className="text-indigo-400 hover:text-indigo-300 font-semibold cursor-pointer underline"
+                  >
+                    Upload files to begin
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -266,6 +283,29 @@ export default function App() {
               <span>{messages.length} exchanges</span>
             </div>
           </div>
+
+          {/* Empty dataset prompt banner */}
+          {(!health?.active_dataset || health.active_records === 0) && (
+            <div className="mx-6 mt-4 p-4 rounded-2xl bg-indigo-950/30 border border-indigo-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                  <Database className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="font-bold text-white block">Ready for your financial data</span>
+                  <span className="text-slate-400">
+                    Upload your spreadsheets (Payouts, Transactions, or Reconciliation) to start querying.
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsUploadModalOpen(true)}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-xs transition shadow-md shadow-indigo-600/25 shrink-0 cursor-pointer"
+              >
+                Upload Dataset
+              </button>
+            </div>
+          )}
 
           {/* Scrollable Conversation Stream */}
           <div className="flex-1 overflow-y-auto px-4 py-6 md:px-6 space-y-4">

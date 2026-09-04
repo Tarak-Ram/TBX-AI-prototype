@@ -8,12 +8,12 @@ interface ChatInputProps {
 }
 
 const SAMPLE_QUERIES = [
-  'How much did Acme Corp receive in August 2026?',
-  'What about July?',
-  'Show me the transactions behind that number',
   'Which vendor received the highest payouts?',
-  'What is the total spend in June 2026?',
-  'How many unreconciled transactions are there?',
+  'What is our total spend across all records?',
+  'Show unreconciled transactions',
+  'Category breakdown of expenses',
+  'Count of total transactions',
+  'Show the transactions behind that number',
 ];
 
 export const ChatInput: React.FC<ChatInputProps> = ({

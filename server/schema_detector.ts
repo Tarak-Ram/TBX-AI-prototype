@@ -1,6 +1,6 @@
 import { FinancialRecord } from './types';
 
-export type FinancialDomain = 'vendor_payouts' | 'reconciliation' | 'transactions';
+export type FinancialDomain = 'vendor_payouts' | 'reconciliation' | 'transactions' | 'reference';
 
 export interface ColumnMapping {
   canonical: 'vendor' | 'amount' | 'transaction_date' | 'category' | 'status';
@@ -15,6 +15,111 @@ export interface SchemaAnalysisResult {
   rowCount: number;
   sampleRows: any[];
   summary: string;
+}
+
+export function parseAndNormalizeDate(val: any): string {
+  if (val === undefined || val === null || val === '') {
+    return new Date().toISOString().split('T')[0];
+  }
+
+  // 1. JS Date object
+  if (val instanceof Date && !isNaN(val.getTime())) {
+    return val.toISOString().split('T')[0];
+  }
+
+  // 2. Numeric Excel serial date (e.g. 45306 or "45306")
+  let numVal: number | null = null;
+  if (typeof val === 'number' && !isNaN(val)) {
+    numVal = val;
+  } else if (typeof val === 'string' && /^\d{5}(\.\d+)?$/.test(val.trim())) {
+    numVal = parseFloat(val.trim());
+  }
+
+  if (numVal !== null && numVal >= 20000 && numVal <= 90000) {
+    // 25569 is Jan 1 1970
+    const d = new Date(Math.round((numVal - 25569) * 86400 * 1000));
+    if (!isNaN(d.getTime())) {
+      return d.toISOString().split('T')[0];
+    }
+  }
+
+  const str = String(val).trim();
+  if (!str) return new Date().toISOString().split('T')[0];
+
+  // 3. Check for standard ISO YYYY-MM-DD
+  const isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (isoMatch) {
+    const yyyy = isoMatch[1];
+    const mm = isoMatch[2].padStart(2, '0');
+    const dd = isoMatch[3].padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // 4. Check for DD/MM/YYYY or MM/DD/YYYY
+  const slashMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+  if (slashMatch) {
+    const p1 = parseInt(slashMatch[1], 10);
+    const p2 = parseInt(slashMatch[2], 10);
+    const yyyy = slashMatch[3];
+    let mm: string;
+    let dd: string;
+    if (p1 > 12) {
+      dd = String(p1).padStart(2, '0');
+      mm = String(p2).padStart(2, '0');
+    } else if (p2 > 12) {
+      mm = String(p1).padStart(2, '0');
+      dd = String(p2).padStart(2, '0');
+    } else {
+      dd = String(p1).padStart(2, '0');
+      mm = String(p2).padStart(2, '0');
+    }
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // 5. Check for text month dates like "15-Jan-2024", "15 Jan 2024", "January 15, 2024"
+  const monthMap: Record<string, string> = {
+    jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+    jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+  };
+  const textMonthMatch = str.match(/([a-zA-Z]{3,9})/);
+  const yearMatch = str.match(/\b(19\d\d|20\d\d)\b/);
+  const dayMatch = str.match(/\b([0-2]?\d|3[01])\b/);
+
+  if (textMonthMatch && yearMatch) {
+    const monthKey = textMonthMatch[1].toLowerCase().slice(0, 3);
+    const mm = monthMap[monthKey];
+    if (mm) {
+      const yyyy = yearMatch[1];
+      const dd = dayMatch ? dayMatch[1].padStart(2, '0') : '01';
+      return `${yyyy}-${mm}-${dd}`;
+    }
+  }
+
+  // 6. Native Date parse
+  const parsedTs = Date.parse(str);
+  if (!isNaN(parsedTs)) {
+    return new Date(parsedTs).toISOString().split('T')[0];
+  }
+
+  return new Date().toISOString().split('T')[0];
+}
+
+export function parseAmount(rawAmt: any): number {
+  if (rawAmt === undefined || rawAmt === null) return 0;
+  if (typeof rawAmt === 'number') return isNaN(rawAmt) ? 0 : rawAmt;
+  
+  let str = String(rawAmt).trim();
+  // Handle accounting format: (1,234.56) -> -1234.56
+  const isNegative = str.startsWith('(') && str.endsWith(')');
+  if (isNegative) {
+    str = str.slice(1, -1).trim();
+  }
+
+  // Strip currency symbols and formatting commas
+  str = str.replace(/[₹$,€£Rs\s]/gi, '').trim();
+  const parsed = parseFloat(str);
+  if (isNaN(parsed)) return 0;
+  return isNegative ? -parsed : parsed;
 }
 
 export function detectSchemaAndDomain(rawRows: any[], fileName: string = ''): SchemaAnalysisResult {
@@ -40,26 +145,67 @@ export function detectSchemaAndDomain(rawRows: any[], fileName: string = ''): Sc
   const lowerHeaders = headers.map((h) => h.toLowerCase());
   const lowerFileName = fileName.toLowerCase();
 
+  // Check if this is a master / reference table (Chart of Accounts or Vendor master)
+  const isChartOfAccounts =
+    lowerFileName.includes('chart_of_accounts') ||
+    lowerFileName.includes('accounts.csv') ||
+    lowerFileName.includes('ledger_master') ||
+    (lowerHeaders.some((h) => h.includes('account_name') || h.includes('account_type')) &&
+      !lowerHeaders.some((h) => h.includes('paid') || h.includes('payout')));
+
+  const isVendorMaster =
+    (lowerFileName.includes('vendor') && !lowerFileName.includes('payout') && !lowerFileName.includes('disbursement')) ||
+    (lowerHeaders.some((h) => h.includes('vendor_id')) && !lowerHeaders.some((h) => h.includes('amount') || h.includes('paid')));
+
+  // Check if amounts exist in the rows
+  const hasAmountColumn = lowerHeaders.some((h) =>
+    ['amount', 'paid', 'total', 'cost', 'debit', 'credit', 'value', 'price', 'gross', 'net'].some((k) => h.includes(k))
+  );
+
+  if ((isChartOfAccounts || isVendorMaster) && !hasAmountColumn) {
+    const detectedColumns: ColumnMapping[] = [];
+    const vendorH = headers.find((h) => {
+      const lh = h.toLowerCase();
+      return lh.includes('name') || lh.includes('account') || lh.includes('vendor') || lh.includes('party');
+    });
+    if (vendorH) detectedColumns.push({ canonical: 'vendor', sourceHeader: vendorH });
+    const catH = headers.find((h) => {
+      const lh = h.toLowerCase();
+      return lh.includes('type') || lh.includes('category') || lh.includes('group');
+    });
+    if (catH) detectedColumns.push({ canonical: 'category', sourceHeader: catH });
+
+    return {
+      domain: 'reference',
+      domainLabel: isChartOfAccounts ? 'Chart of Accounts (Reference)' : 'Vendor Registry (Reference)',
+      confidence: 0.95,
+      detectedColumns,
+      rowCount: rawRows.length,
+      sampleRows: sample.slice(0, 3),
+      summary: `Identified as Reference Master Data (${rawRows.length} rows).`,
+    };
+  }
+
   // Scoring systems
   let payoutScore = 0;
   let reconScore = 0;
   let txScore = 0;
 
   // 1. Filename clues
-  if (lowerFileName.includes('payout') || lowerFileName.includes('disbursement') || lowerFileName.includes('supplier')) {
-    payoutScore += 4;
+  if (lowerFileName.includes('payout') || lowerFileName.includes('disbursement') || lowerFileName.includes('batch')) {
+    payoutScore += 5;
   }
   if (lowerFileName.includes('recon') || lowerFileName.includes('match') || lowerFileName.includes('settlement')) {
-    reconScore += 4;
+    reconScore += 5;
   }
-  if (lowerFileName.includes('tx') || lowerFileName.includes('transaction') || lowerFileName.includes('ledger') || lowerFileName.includes('expense')) {
+  if (lowerFileName.includes('tx') || lowerFileName.includes('transaction') || lowerFileName.includes('ledger') || lowerFileName.includes('expense') || lowerFileName.includes('spend')) {
     txScore += 4;
   }
 
   // 2. Header analysis
-  const payoutKeywords = ['payout', 'disbursement', 'utr', 'beneficiary', 'payee', 'supplier', 'vendor', 'payout_id', 'payout_method', 'batch_id'];
+  const payoutKeywords = ['payout', 'disbursement', 'utr', 'beneficiary', 'payee', 'supplier', 'payout_id', 'payout_method', 'batch_id'];
   const reconKeywords = ['recon', 'reconciled', 'match_status', 'reconciliation_status', 'bank_ref', 'variance', 'discrepancy', 'unreconciled', 'settled_at'];
-  const txKeywords = ['category', 'department', 'ledger', 'cost_center', 'account', 'tx_type', 'debit', 'credit', 'invoice', 'expense_type'];
+  const txKeywords = ['category', 'department', 'ledger', 'cost_center', 'tx_type', 'debit', 'credit', 'invoice', 'expense_type', 'description'];
 
   headers.forEach((h) => {
     const lk = h.toLowerCase();
@@ -119,23 +265,42 @@ export function detectSchemaAndDomain(rawRows: any[], fileName: string = ''): Sc
   };
 
   // Vendor / Payee
-  const vendorH = findBestHeader(['vendor', 'payee', 'supplier', 'beneficiary_name', 'merchant', 'beneficiary', 'party_name', 'name']);
+  const vendorH = findBestHeader(['vendor', 'payee', 'supplier', 'beneficiary_name', 'merchant', 'beneficiary', 'party_name', 'party', 'entity', 'company', 'name']);
   if (vendorH) detectedColumns.push({ canonical: 'vendor', sourceHeader: vendorH });
 
   // Amount
-  const amountH = findBestHeader(['amount', 'paid_amount', 'net_amount', 'payout_amount', 'total_amount', 'debit', 'total', 'value', 'txn_amount', 'cost']);
+  const amountH = findBestHeader(['amount', 'paid_amount', 'net_amount', 'payout_amount', 'total_amount', 'debit', 'total', 'value', 'txn_amount', 'cost', 'gross']);
   if (amountH) detectedColumns.push({ canonical: 'amount', sourceHeader: amountH });
 
   // Date
-  const dateH = findBestHeader(['transaction_date', 'payout_date', 'payment_date', 'date', 'value_date', 'created_at', 'timestamp']);
+  const dateH = findBestHeader(['transaction_date', 'payout_date', 'payment_date', 'date', 'value_date', 'posting_date', 'txn_date', 'created_at', 'timestamp']);
   if (dateH) detectedColumns.push({ canonical: 'transaction_date', sourceHeader: dateH });
 
   // Category
-  const catH = findBestHeader(['category', 'department', 'cost_center', 'type', 'expense_type', 'ledger_category']);
+  const catH = findBestHeader([
+    'category',
+    'category_name',
+    'category name',
+    'cat_name',
+    'item_category',
+    'expense_category',
+    'department',
+    'cost_center',
+    'type',
+    'expense_type',
+    'expense_head',
+    'account_head',
+    'head',
+    'purpose',
+    'ledger_category',
+    'particulars',
+    'item_name',
+    'item',
+  ]);
   if (catH) detectedColumns.push({ canonical: 'category', sourceHeader: catH });
 
   // Status
-  const statusH = findBestHeader(['status', 'reconciliation_status', 'recon_status', 'match_status', 'payout_status', 'state']);
+  const statusH = findBestHeader(['status', 'reconciliation_status', 'recon_status', 'match_status', 'payout_status', 'state', 'remarks']);
   if (statusH) detectedColumns.push({ canonical: 'status', sourceHeader: statusH });
 
   return {
@@ -171,55 +336,37 @@ export function normalizeRowsWithSchema(rawRows: any[], fileName: string = ''): 
         }
       }
     }
-    if (!vendor) vendor = schema.domain === 'vendor_payouts' ? 'Vendor Payee' : 'Corporate Entity';
+    if (!vendor) {
+      vendor = schema.domain === 'vendor_payouts' ? 'Vendor Payee' : schema.domain === 'reference' ? 'Reference Entity' : 'Corporate Entity';
+    }
 
     // 2. Amount resolution
     let amount = 0;
     const rawAmt = amountHeader ? row[amountHeader] : undefined;
     if (rawAmt !== undefined && rawAmt !== null) {
-      if (typeof rawAmt === 'number') {
-        amount = rawAmt;
-      } else {
-        const str = String(rawAmt).replace(/[₹$,]/g, '').trim();
-        const parsed = parseFloat(str);
-        amount = isNaN(parsed) ? 0 : parsed;
-      }
+      amount = parseAmount(rawAmt);
     } else {
       for (const [k, v] of Object.entries(row)) {
         const lk = k.toLowerCase();
         if (lk.includes('amount') || lk.includes('paid') || lk.includes('total') || lk.includes('cost') || lk.includes('price')) {
-          const num = typeof v === 'number' ? v : parseFloat(String(v).replace(/[₹$,]/g, ''));
-          if (!isNaN(num)) {
-            amount = num;
-            break;
-          }
+          amount = parseAmount(v);
+          if (amount !== 0) break;
         }
       }
     }
 
     // 3. Date resolution
-    let transaction_date = dateHeader ? String(row[dateHeader] || '').trim() : '';
-    if (!transaction_date) {
+    let rawDate = dateHeader ? row[dateHeader] : undefined;
+    if (rawDate === undefined || rawDate === null || rawDate === '') {
       for (const [k, v] of Object.entries(row)) {
         const lk = k.toLowerCase();
         if (lk.includes('date') || lk.includes('time') || lk.includes('day')) {
-          transaction_date = String(v || '').trim();
+          rawDate = v;
           break;
         }
       }
     }
-    if (!transaction_date) {
-      transaction_date = new Date().toISOString().split('T')[0];
-    } else if (transaction_date.includes('/') || transaction_date.includes('-')) {
-      // Normalize simple dates if possible
-      const parts = transaction_date.split(/[-/]/);
-      if (parts.length === 3 && parts[0].length === 4) {
-        const yyyy = parts[0];
-        const mm = parts[1].padStart(2, '0');
-        const dd = parts[2].padStart(2, '0');
-        transaction_date = `${yyyy}-${mm}-${dd}`;
-      }
-    }
+    const transaction_date = parseAndNormalizeDate(rawDate);
 
     // 4. Category resolution
     let category = catHeader ? String(row[catHeader] || '').trim() : '';
@@ -235,6 +382,7 @@ export function normalizeRowsWithSchema(rawRows: any[], fileName: string = ''): 
     if (!category) {
       if (schema.domain === 'vendor_payouts') category = 'Vendor Disbursement';
       else if (schema.domain === 'reconciliation') category = 'Settlement & Clearance';
+      else if (schema.domain === 'reference') category = 'Reference Master';
       else category = 'General Expense';
     }
 
@@ -258,6 +406,9 @@ export function normalizeRowsWithSchema(rawRows: any[], fileName: string = ''): 
       else if (sLower.includes('recon') || sLower.includes('match') || sLower.includes('success')) status = 'Reconciled';
       else if (sLower.includes('pend')) status = 'Pending';
       else if (sLower.includes('fail') || sLower.includes('reject')) status = 'Failed';
+      else if (sLower.includes('active')) status = 'Active';
+      else if (sLower.includes('post')) status = 'Posted';
+      else if (sLower.includes('comp')) status = 'Completed';
     }
 
     records.push({

@@ -40,7 +40,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
 
       <div className="flex-1 max-w-3xl bg-slate-900/60 border border-slate-800 rounded-3xl p-6 shadow-xl backdrop-blur-xs space-y-4">
         {/* Main Answer Headline */}
-        <div className="text-base font-semibold text-white leading-relaxed tracking-tight">
+        <div className="text-base font-semibold text-white leading-relaxed tracking-tight whitespace-pre-line">
           {message.text}
         </div>
 
@@ -70,7 +70,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
 
               <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 px-2.5 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5">
                 <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                {payload.records} records
+                {payload.records} {payload.records === 1 ? 'record' : 'records'}
               </span>
 
               <span className="bg-slate-800/60 border border-slate-800 text-slate-400 px-2.5 py-1 rounded-xl text-xs">
@@ -79,7 +79,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
             </div>
 
             {/* Breakdown Table Bento Container */}
-            {payload.breakdown && payload.breakdown.length > 0 && (
+            {!payload.only_amount && payload.breakdown && payload.breakdown.length > 0 && (
               <div className="border border-slate-800 rounded-2xl overflow-hidden bg-slate-950/60 mt-2">
                 <div className="bg-slate-900/80 px-4 py-2 border-b border-slate-800 flex items-center justify-between text-xs font-semibold text-slate-300">
                   <div className="flex items-center gap-2">
@@ -96,23 +96,35 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
                       <tr>
                         <th className="p-3">Entity / Category</th>
                         <th className="p-3 text-right">Amount (₹)</th>
-                        <th className="p-3 text-center">Rows</th>
+                        <th className="p-3 text-center">Transactions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-850">
-                      {payload.breakdown.map((row, idx) => (
-                        <tr key={idx} className="hover:bg-slate-850/50 transition-colors">
-                          <td className="p-3 font-medium text-slate-200">
-                            {row.vendor || row.category || row.month || `Item ${idx + 1}`}
-                          </td>
-                          <td className="p-3 text-right font-mono font-semibold text-emerald-400">
-                            ₹{Number(row.total_amount || row.amount || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                          </td>
-                          <td className="p-3 text-center text-slate-400 font-mono">
-                            {row.record_count || 1}
-                          </td>
-                        </tr>
-                      ))}
+                      {payload.breakdown.map((row, idx) => {
+                        const entityName =
+                          row.entity ||
+                          row.category ||
+                          row.vendor ||
+                          row.month ||
+                          row.name ||
+                          row.description ||
+                          `Category ${idx + 1}`;
+                        const amount = Number(row.total_amount ?? row.amount ?? 0);
+                        const count = Number(row.record_count ?? row.count ?? 1);
+                        return (
+                          <tr key={idx} className="hover:bg-slate-850/50 transition-colors">
+                            <td className="p-3 font-medium text-slate-200">
+                              {entityName}
+                            </td>
+                            <td className="p-3 text-right font-mono font-semibold text-emerald-400">
+                              ₹{amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                            </td>
+                            <td className="p-3 text-center text-slate-400 font-mono">
+                              {count}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

@@ -1,33 +1,6 @@
 import { FinancialRecord, FinancialIntent, EvidenceData, BreakdownItem, ResponsePayload } from './types';
 import { duckdbManager } from './duckdb';
-
-// Pre-seeded comprehensive corporate transactions
-const INITIAL_DEMO_RECORDS: FinancialRecord[] = [
-  // August 2026 transactions
-  { id: 'tx-01', vendor: 'Acme Corp', amount: 12431882.0, transaction_date: '2026-08-15', category: 'Hardware & Infrastructure', status: 'Reconciled' },
-  { id: 'tx-02', vendor: 'XYZ Logistics', amount: 4500000.0, transaction_date: '2026-08-10', category: 'Supply Chain', status: 'Reconciled' },
-  { id: 'tx-03', vendor: 'CloudScale Systems', amount: 2850000.0, transaction_date: '2026-08-20', category: 'Cloud Services', status: 'Reconciled' },
-  { id: 'tx-04', vendor: 'Alpha Security', amount: 1200000.0, transaction_date: '2026-08-05', category: 'Cybersecurity', status: 'Unreconciled' },
-  { id: 'tx-05', vendor: 'TechFlow Solutions', amount: 950000.0, transaction_date: '2026-08-28', category: 'Software', status: 'Reconciled' },
-  { id: 'tx-06', vendor: 'Acme Corp', amount: 500000.0, transaction_date: '2026-08-22', category: 'Hardware', status: 'Reconciled' },
-  { id: 'tx-07', vendor: 'Apex Travel', amount: 340000.0, transaction_date: '2026-08-18', category: 'Travel', status: 'Reconciled' },
-  { id: 'tx-08', vendor: 'OfficeSphere', amount: 120000.0, transaction_date: '2026-08-12', category: 'Office Supplies', status: 'Unreconciled' },
-  { id: 'tx-09', vendor: 'Delta Marketing', amount: 1800000.0, transaction_date: '2026-08-01', category: 'Marketing', status: 'Unreconciled' },
-  { id: 'tx-10', vendor: 'Global Legal Advisors', amount: 750000.0, transaction_date: '2026-08-04', category: 'Legal', status: 'Reconciled' },
-
-  // July 2026 transactions
-  { id: 'tx-11', vendor: 'Acme Corp', amount: 9800000.0, transaction_date: '2026-07-14', category: 'Hardware & Infrastructure', status: 'Reconciled' },
-  { id: 'tx-12', vendor: 'XYZ Logistics', amount: 5200000.0, transaction_date: '2026-07-22', category: 'Supply Chain', status: 'Reconciled' },
-  { id: 'tx-13', vendor: 'CloudScale Systems', amount: 2700000.0, transaction_date: '2026-07-19', category: 'Cloud Services', status: 'Reconciled' },
-  { id: 'tx-14', vendor: 'Apex Travel', amount: 420000.0, transaction_date: '2026-07-08', category: 'Travel', status: 'Reconciled' },
-  { id: 'tx-15', vendor: 'Alpha Security', amount: 1200000.0, transaction_date: '2026-07-03', category: 'Cybersecurity', status: 'Reconciled' },
-
-  // June 2026 transactions
-  { id: 'tx-16', vendor: 'Acme Corp', amount: 8500000.0, transaction_date: '2026-06-11', category: 'Hardware & Infrastructure', status: 'Reconciled' },
-  { id: 'tx-17', vendor: 'XYZ Logistics', amount: 4100000.0, transaction_date: '2026-06-25', category: 'Supply Chain', status: 'Reconciled' },
-  { id: 'tx-18', vendor: 'CloudScale Systems', amount: 2600000.0, transaction_date: '2026-06-15', category: 'Cloud Services', status: 'Reconciled' },
-  { id: 'tx-19', vendor: 'Apex Travel', amount: 290000.0, transaction_date: '2026-06-10', category: 'Travel', status: 'Reconciled' },
-];
+import { parseAndNormalizeDate, parseAmount } from './schema_detector';
 
 export interface DatasetVersion {
   dataset_id: string;
@@ -40,6 +13,10 @@ export interface DatasetVersion {
   table_name: string;
   compatibility_score: number;
   records: FinancialRecord[];
+  distinct_vendors?: string[];
+  distinct_categories?: string[];
+  distinct_statuses?: string[];
+  date_range?: { minDate: string; maxDate: string } | null;
 }
 
 export interface DatasetMeta {
@@ -49,54 +26,201 @@ export interface DatasetMeta {
   versions: Record<number, DatasetVersion>;
 }
 
+function sanitizeAndDeduplicateRecords(records: FinancialRecord[]): FinancialRecord[] {
+  const seen = new Set<string>();
+  const sanitized: FinancialRecord[] = [];
+
+  for (let idx = 0; idx < records.length; idx++) {
+    const r = records[idx];
+    const cleanDate = parseAndNormalizeDate(r.transaction_date);
+    const amt = typeof r.amount === 'number' ? (isNaN(r.amount) ? 0 : r.amount) : parseAmount(r.amount);
+    
+    // Check if it's a reference master row
+    const isRef =
+      r.domain === 'reference' ||
+      (amt === 0 &&
+        (r.category?.toLowerCase().includes('asset') ||
+          r.category?.toLowerCase().includes('liability') ||
+          r.category?.toLowerCase().includes('master') ||
+          r.category?.toLowerCase().includes('reference')));
+
+    const domain = isRef ? 'reference' : (r.domain || 'transactions');
+
+    const normVendor = (r.vendor || '').toLowerCase().replace(/[\s\-_]/g, '');
+    const normAmt = Number(amt).toFixed(2);
+    const normCat = (r.category || '').toLowerCase().trim();
+    const normStat = (r.status || '').toLowerCase().trim();
+
+    const dedupKey = `${domain}|${normVendor}|${normAmt}|${cleanDate}|${normCat}|${normStat}`;
+    if (!seen.has(dedupKey)) {
+      seen.add(dedupKey);
+      sanitized.push({
+        id: r.id || `rec_${idx + 1}`,
+        vendor: r.vendor || 'Entity',
+        amount: amt,
+        transaction_date: cleanDate,
+        category: r.category || 'General Expense',
+        status: r.status || 'Reconciled',
+        domain,
+        source_file: r.source_file || 'uploaded_data',
+      });
+    }
+  }
+
+  return sanitized;
+}
+
+function buildDateSqlCondition(dateLabel?: string | null): string | null {
+  if (!dateLabel) return null;
+  const dClean = dateLabel.trim().toLowerCase();
+  const monthMap: Record<string, string> = {
+    january: '01', jan: '01',
+    february: '02', feb: '02',
+    march: '03', mar: '03',
+    april: '04', apr: '04',
+    may: '05',
+    june: '06', jun: '06',
+    july: '07', jul: '07',
+    august: '08', aug: '08',
+    september: '09', sep: '09', sept: '09',
+    october: '10', oct: '10',
+    november: '11', nov: '11',
+    december: '12', dec: '12',
+  };
+
+  const yearMatch = dClean.match(/\b(19\d\d|20\d\d)\b/);
+  const year = yearMatch ? yearMatch[1] : null;
+
+  let foundMonth: string | null = null;
+  for (const [mName, mCode] of Object.entries(monthMap)) {
+    if (dClean.includes(mName)) {
+      foundMonth = mCode;
+      break;
+    }
+  }
+
+  if (year && foundMonth) {
+    return `transaction_date LIKE '${year}-${foundMonth}%'`;
+  }
+  if (foundMonth) {
+    return `SUBSTRING(transaction_date, 6, 2) = '${foundMonth}'`;
+  }
+  if (year) {
+    return `transaction_date LIKE '${year}%'`;
+  }
+  if (dClean.includes('q1')) {
+    return year ? `transaction_date LIKE '${year}%' AND SUBSTRING(transaction_date, 6, 2) IN ('01', '02', '03')` : `SUBSTRING(transaction_date, 6, 2) IN ('01', '02', '03')`;
+  }
+  if (dClean.includes('q2')) {
+    return year ? `transaction_date LIKE '${year}%' AND SUBSTRING(transaction_date, 6, 2) IN ('04', '05', '06')` : `SUBSTRING(transaction_date, 6, 2) IN ('04', '05', '06')`;
+  }
+  if (dClean.includes('q3')) {
+    return year ? `transaction_date LIKE '${year}%' AND SUBSTRING(transaction_date, 6, 2) IN ('07', '08', '09')` : `SUBSTRING(transaction_date, 6, 2) IN ('07', '08', '09')`;
+  }
+  if (dClean.includes('q4')) {
+    return year ? `transaction_date LIKE '${year}%' AND SUBSTRING(transaction_date, 6, 2) IN ('10', '11', '12')` : `SUBSTRING(transaction_date, 6, 2) IN ('10', '11', '12')`;
+  }
+
+  return null;
+}
+
 class DatasetManager {
-  private datasets: Map<string, DatasetMeta> = new Map();
-  public activeDatasetId: string = 'bvp_finance_demo';
+  public datasets: Map<string, DatasetMeta> = new Map();
+  public activeDatasetId: string = '';
   private evidenceStore: Map<string, EvidenceData> = new Map();
 
   constructor() {
-    this.seedDefaultDataset();
-    duckdbManager.registerTable('active_dataset_v1', INITIAL_DEMO_RECORDS).catch((err) => {
-      console.warn('Initial DuckDB seeding warning:', err);
+    duckdbManager.init().catch((err) => {
+      console.warn('Initial DuckDB initialization warning:', err);
     });
   }
 
-  private seedDefaultDataset() {
-    const version1: DatasetVersion = {
-      dataset_id: 'bvp_finance_demo',
-      dataset_version: 1,
-      created_at: new Date().toISOString(),
-      row_count: INITIAL_DEMO_RECORDS.length,
-      source_file: 'bvp_catalyst_transactions_2026.csv',
-      status: 'ACTIVE',
-      mapped_fields: {
-        vendor: 'Vendor Name',
-        amount: 'Amount Paid',
-        transaction_date: 'Transaction Date',
-        category: 'Category',
-        status: 'Status',
-      },
-      table_name: 'active_dataset_v1',
-      compatibility_score: 1.0,
-      records: [...INITIAL_DEMO_RECORDS],
-    };
-
-    const meta: DatasetMeta = {
-      dataset_id: 'bvp_finance_demo',
-      name: 'BVP Tech Catalyst Demo Dataset',
-      active_version: 1,
-      versions: { 1: version1 },
-    };
-
-    this.datasets.set('bvp_finance_demo', meta);
-    this.activeDatasetId = 'bvp_finance_demo';
+  public getDataset(id: string): DatasetMeta | undefined {
+    return this.datasets.get(id);
   }
 
   public getActiveDataset(): { meta: DatasetMeta | null; activeVersion: DatasetVersion | null } {
+    if (!this.activeDatasetId) return { meta: null, activeVersion: null };
     const meta = this.datasets.get(this.activeDatasetId);
     if (!meta) return { meta: null, activeVersion: null };
     const activeVersion = meta.versions[meta.active_version] || null;
     return { meta, activeVersion };
+  }
+
+  public getDistinctVendors(): string[] {
+    const { activeVersion } = this.getActiveDataset();
+    if (!activeVersion) return [];
+    if (activeVersion.distinct_vendors && activeVersion.distinct_vendors.length > 0) {
+      return activeVersion.distinct_vendors;
+    }
+    const set = new Set<string>();
+    if (activeVersion.records) {
+      for (const r of activeVersion.records) {
+        if (r.domain === 'reference') continue;
+        if (r.vendor && typeof r.vendor === 'string' && r.vendor.trim()) {
+          set.add(r.vendor.trim());
+        }
+      }
+      if (set.size === 0) {
+        for (const r of activeVersion.records) {
+          if (r.vendor && typeof r.vendor === 'string' && r.vendor.trim()) {
+            set.add(r.vendor.trim());
+          }
+        }
+      }
+    }
+    return Array.from(set);
+  }
+
+  public getDistinctCategories(): string[] {
+    const { activeVersion } = this.getActiveDataset();
+    if (!activeVersion) return [];
+    if (activeVersion.distinct_categories && activeVersion.distinct_categories.length > 0) {
+      return activeVersion.distinct_categories;
+    }
+    const set = new Set<string>();
+    if (activeVersion.records) {
+      for (const r of activeVersion.records) {
+        if (r.domain === 'reference') continue;
+        if (r.category && typeof r.category === 'string' && r.category.trim()) {
+          set.add(r.category.trim());
+        }
+      }
+    }
+    return Array.from(set);
+  }
+
+  public getDistinctStatuses(): string[] {
+    const { activeVersion } = this.getActiveDataset();
+    if (!activeVersion) return [];
+    if (activeVersion.distinct_statuses && activeVersion.distinct_statuses.length > 0) {
+      return activeVersion.distinct_statuses;
+    }
+    const set = new Set<string>();
+    if (activeVersion.records) {
+      for (const r of activeVersion.records) {
+        if (r.domain === 'reference') continue;
+        if (r.status && typeof r.status === 'string' && r.status.trim()) {
+          set.add(r.status.trim());
+        }
+      }
+    }
+    return Array.from(set);
+  }
+
+  public getDateRange(): { minDate: string; maxDate: string } | null {
+    const { activeVersion } = this.getActiveDataset();
+    if (!activeVersion) return null;
+    if (activeVersion.date_range !== undefined) {
+      return activeVersion.date_range;
+    }
+    if (!activeVersion.records || activeVersion.records.length === 0) return null;
+    const dates = activeVersion.records
+      .map((r) => r.transaction_date)
+      .filter((d) => !!d && typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d))
+      .sort();
+    if (dates.length === 0) return null;
+    return { minDate: dates[0], maxDate: dates[dates.length - 1] };
   }
 
   public listDatasets(): any[] {
@@ -112,6 +236,24 @@ class DatasetManager {
     return list;
   }
 
+  public async setActiveDataset(datasetId: string, version?: number): Promise<boolean> {
+    const meta = this.datasets.get(datasetId);
+    if (!meta) return false;
+    this.activeDatasetId = datasetId;
+    if (version && meta.versions[version]) {
+      meta.active_version = version;
+    }
+    const currentVersion = meta.versions[meta.active_version];
+    if (currentVersion) {
+      try {
+        await duckdbManager.setActiveView(currentVersion.table_name);
+      } catch (err) {
+        console.warn('DuckDB setActiveView warning:', err);
+      }
+    }
+    return true;
+  }
+
   public getEvidence(queryId: string): EvidenceData | undefined {
     return this.evidenceStore.get(queryId);
   }
@@ -120,15 +262,17 @@ class DatasetManager {
     this.evidenceStore.set(evidence.query_id, evidence);
   }
 
-  public addRecords(
+  public async addRecords(
     datasetId: string,
     records: FinancialRecord[],
     mode: 'create' | 'add' | 'replace',
     name?: string,
     sourceFile?: string
-  ): DatasetVersion {
+  ): Promise<DatasetVersion> {
     let meta = this.datasets.get(datasetId);
     let nextVersion = 1;
+
+    const sanitizedNew = sanitizeAndDeduplicateRecords(records);
 
     if (mode === 'create' || !meta) {
       nextVersion = 1;
@@ -136,7 +280,7 @@ class DatasetManager {
         dataset_id: datasetId,
         dataset_version: nextVersion,
         created_at: new Date().toISOString(),
-        row_count: records.length,
+        row_count: sanitizedNew.length,
         source_file: sourceFile || 'uploaded_dataset.csv',
         status: 'ACTIVE',
         mapped_fields: {
@@ -148,7 +292,7 @@ class DatasetManager {
         },
         table_name: `active_dataset_${datasetId}_v${nextVersion}`,
         compatibility_score: 1.0,
-        records: [...records],
+        records: sanitizedNew,
       };
 
       meta = {
@@ -159,9 +303,11 @@ class DatasetManager {
       };
       this.datasets.set(datasetId, meta);
       this.activeDatasetId = datasetId;
-      duckdbManager.registerTable(newVersion.table_name, newVersion.records).catch((err) => {
+      try {
+        await duckdbManager.registerTable(newVersion.table_name, newVersion.records);
+      } catch (err) {
         console.warn('DuckDB create table warning:', err);
-      });
+      }
       return newVersion;
     }
 
@@ -171,27 +317,29 @@ class DatasetManager {
         dataset_id: datasetId,
         dataset_version: nextVersion,
         created_at: new Date().toISOString(),
-        row_count: records.length,
+        row_count: sanitizedNew.length,
         source_file: sourceFile || 'uploaded_replace.csv',
         status: 'ACTIVE',
         mapped_fields: meta.versions[meta.active_version]?.mapped_fields || {},
         table_name: `active_dataset_${datasetId}_v${nextVersion}`,
         compatibility_score: 1.0,
-        records: [...records],
+        records: sanitizedNew,
       };
       meta.versions[nextVersion] = newVersion;
       meta.active_version = nextVersion;
       this.activeDatasetId = datasetId;
-      duckdbManager.registerTable(newVersion.table_name, newVersion.records).catch((err) => {
+      try {
+        await duckdbManager.registerTable(newVersion.table_name, newVersion.records);
+      } catch (err) {
         console.warn('DuckDB replace table warning:', err);
-      });
+      }
       return newVersion;
     }
 
     // Append mode
     nextVersion = meta.active_version + 1;
     const currentRecords = meta.versions[meta.active_version]?.records || [];
-    const combined = [...currentRecords, ...records];
+    const combined = sanitizeAndDeduplicateRecords([...currentRecords, ...records]);
     const newVersion: DatasetVersion = {
       dataset_id: datasetId,
       dataset_version: nextVersion,
@@ -207,9 +355,97 @@ class DatasetManager {
     meta.versions[nextVersion] = newVersion;
     meta.active_version = nextVersion;
     this.activeDatasetId = datasetId;
-    duckdbManager.registerTable(newVersion.table_name, newVersion.records).catch((err) => {
+    try {
+      await duckdbManager.registerTable(newVersion.table_name, newVersion.records);
+    } catch (err) {
       console.warn('DuckDB append table warning:', err);
-    });
+    }
+    return newVersion;
+  }
+
+  public async addRecordsFromTable(
+    datasetId: string,
+    tableName: string,
+    rowCount: number,
+    mode: 'create' | 'add' | 'replace',
+    name?: string,
+    sourceFile?: string,
+    sampleRecords: FinancialRecord[] = [],
+    mappedFields: Record<string, string> = {}
+  ): Promise<DatasetVersion> {
+    let meta = this.datasets.get(datasetId);
+    let nextVersion = 1;
+
+    if (mode === 'create' || !meta) {
+      nextVersion = 1;
+    } else {
+      nextVersion = meta.active_version + 1;
+    }
+
+    // Query distinct metadata directly from DuckDB
+    let distinctVendors: string[] = [];
+    let distinctCategories: string[] = [];
+    let distinctStatuses: string[] = [];
+    let dateRange: { minDate: string; maxDate: string } | null = null;
+
+    try {
+      const vRows = await duckdbManager.all<{ vendor: string }>(
+        `SELECT DISTINCT vendor FROM ${tableName} WHERE vendor IS NOT NULL AND TRIM(vendor) != '' LIMIT 100`
+      );
+      distinctVendors = vRows.map((r) => r.vendor);
+
+      const cRows = await duckdbManager.all<{ category: string }>(
+        `SELECT DISTINCT category FROM ${tableName} WHERE category IS NOT NULL AND TRIM(category) != '' LIMIT 100`
+      );
+      distinctCategories = cRows.map((r) => r.category);
+
+      const sRows = await duckdbManager.all<{ status: string }>(
+        `SELECT DISTINCT status FROM ${tableName} WHERE status IS NOT NULL AND TRIM(status) != '' LIMIT 100`
+      );
+      distinctStatuses = sRows.map((r) => r.status);
+
+      const dRows = await duckdbManager.all<{ min_d: string; max_d: string }>(
+        `SELECT MIN(transaction_date) as min_d, MAX(transaction_date) as max_d FROM ${tableName} WHERE transaction_date IS NOT NULL AND transaction_date != ''`
+      );
+      if (dRows[0]?.min_d && dRows[0]?.max_d) {
+        dateRange = { minDate: dRows[0].min_d, maxDate: dRows[0].max_d };
+      }
+    } catch (err) {
+      console.warn('Metadata query warning from DuckDB table:', err);
+    }
+
+    const newVersion: DatasetVersion = {
+      dataset_id: datasetId,
+      dataset_version: nextVersion,
+      created_at: new Date().toISOString(),
+      row_count: rowCount,
+      source_file: sourceFile || 'bulk_ingested.csv',
+      status: 'ACTIVE',
+      mapped_fields: mappedFields,
+      table_name: tableName,
+      compatibility_score: 1.0,
+      records: sampleRecords,
+      distinct_vendors: distinctVendors,
+      distinct_categories: distinctCategories,
+      distinct_statuses: distinctStatuses,
+      date_range: dateRange,
+    };
+
+    if (!meta) {
+      meta = {
+        dataset_id: datasetId,
+        name: name || datasetId,
+        active_version: nextVersion,
+        versions: { [nextVersion]: newVersion },
+      };
+      this.datasets.set(datasetId, meta);
+    } else {
+      meta.versions[nextVersion] = newVersion;
+      meta.active_version = nextVersion;
+    }
+
+    this.activeDatasetId = datasetId;
+    await duckdbManager.setActiveView(tableName);
     return newVersion;
   }
 
@@ -230,36 +466,40 @@ class DatasetManager {
     const sqlConditions: string[] = [];
     const sqlParams: any[] = [];
 
-    if (intent.vendor) {
-      sqlConditions.push(`LOWER(vendor) LIKE ?`);
-      sqlParams.push(`%${intent.vendor.toLowerCase().trim()}%`);
+    // 1. Domain isolation
+    const activeDomains = new Set(records.map((r) => r.domain));
+    if (intent.domain && (intent.domain as string) !== 'all' && activeDomains.has(intent.domain)) {
+      sqlConditions.push(`domain = ?`);
+      sqlParams.push(intent.domain);
+    } else {
+      // Exclude zero-amount reference master records from financial computations
+      sqlConditions.push(`(domain != 'reference' OR amount > 0)`);
     }
 
+    // 2. Vendor matching
+    if (intent.vendor) {
+      const cleanV = intent.vendor.toLowerCase().trim();
+      const strippedV = cleanV.replace(/[\s\-_]/g, '');
+      sqlConditions.push(`(LOWER(vendor) LIKE ? OR REPLACE(REPLACE(REPLACE(LOWER(vendor), '-', ''), '_', ''), ' ', '') LIKE ?)`);
+      sqlParams.push(`%${cleanV}%`, `%${strippedV}%`);
+    }
+
+    // 3. Category matching
     if (intent.category) {
       sqlConditions.push(`LOWER(category) LIKE ?`);
       sqlParams.push(`%${intent.category.toLowerCase().trim()}%`);
     }
 
+    // 4. Status matching
     if (intent.status) {
       sqlConditions.push(`LOWER(status) = ?`);
       sqlParams.push(intent.status.toLowerCase().trim());
     }
 
-    if (intent.date_label) {
-      const dClean = intent.date_label.trim().toLowerCase();
-      if (dClean.includes('august') || dClean.includes('aug') || dClean.includes('2026-08')) {
-        sqlConditions.push(`transaction_date LIKE '2026-08%'`);
-      } else if (dClean.includes('july') || dClean.includes('jul') || dClean.includes('2026-07')) {
-        sqlConditions.push(`transaction_date LIKE '2026-07%'`);
-      } else if (dClean.includes('june') || dClean.includes('jun') || dClean.includes('2026-06')) {
-        sqlConditions.push(`transaction_date LIKE '2026-06%'`);
-      } else if (dClean.includes('q3')) {
-        sqlConditions.push(`SUBSTRING(transaction_date, 6, 2) IN ('07', '08', '09')`);
-      } else if (dClean.includes('q2')) {
-        sqlConditions.push(`SUBSTRING(transaction_date, 6, 2) IN ('04', '05', '06')`);
-      } else if (dClean.includes('2026')) {
-        sqlConditions.push(`transaction_date LIKE '2026%'`);
-      }
+    // 5. Date matching
+    const dateCond = buildDateSqlCondition(intent.date_label);
+    if (dateCond) {
+      sqlConditions.push(dateCond);
     }
 
     const whereSql = sqlConditions.length > 0 ? ` WHERE ${sqlConditions.join(' AND ')}` : '';
@@ -268,7 +508,7 @@ class DatasetManager {
     let matchingRecords: FinancialRecord[] = [];
     try {
       matchingRecords = await duckdbManager.all<FinancialRecord>(
-        `SELECT id, vendor, amount, transaction_date, category, status FROM active_dataset${whereSql} ORDER BY transaction_date DESC, amount DESC`,
+        `SELECT id, vendor, amount, transaction_date, category, status, domain, source_file FROM active_dataset${whereSql} ORDER BY transaction_date DESC, amount DESC`,
         sqlParams
       );
     } catch (err) {
@@ -283,7 +523,31 @@ class DatasetManager {
     let breakdown: BreakdownItem[] = [];
     let calculationDesc = '';
 
-    if (intent.operation === 'count') {
+    if (intent.operation === 'list_categories') {
+      try {
+        breakdown = await duckdbManager.all<BreakdownItem>(
+          `SELECT category as entity, category, SUM(amount) as amount, SUM(amount) as total_amount, CAST(COUNT(*) AS INTEGER) as count, CAST(COUNT(*) AS INTEGER) as record_count FROM active_dataset${whereSql} GROUP BY category ORDER BY amount DESC`,
+          sqlParams
+        );
+        totalAmount = breakdown.reduce((acc, cur) => acc + (cur.amount || 0), 0);
+        recordCount = matchingRecords.length;
+        calculationDesc = `SELECT DISTINCT category FROM active_dataset${whereSql}`;
+      } catch {
+        calculationDesc = `SELECT DISTINCT category FROM active_dataset${whereSql}`;
+      }
+    } else if (intent.operation === 'list_vendors') {
+      try {
+        breakdown = await duckdbManager.all<BreakdownItem>(
+          `SELECT vendor as entity, vendor, SUM(amount) as amount, SUM(amount) as total_amount, CAST(COUNT(*) AS INTEGER) as count, CAST(COUNT(*) AS INTEGER) as record_count FROM active_dataset${whereSql} GROUP BY vendor ORDER BY amount DESC`,
+          sqlParams
+        );
+        totalAmount = breakdown.reduce((acc, cur) => acc + (cur.amount || 0), 0);
+        recordCount = matchingRecords.length;
+        calculationDesc = `SELECT DISTINCT vendor FROM active_dataset${whereSql}`;
+      } catch {
+        calculationDesc = `SELECT DISTINCT vendor FROM active_dataset${whereSql}`;
+      }
+    } else if (intent.operation === 'count') {
       try {
         const countRes = await duckdbManager.all<{ total_count: number }>(
           `SELECT CAST(COUNT(*) AS INTEGER) as total_count FROM active_dataset${whereSql}`,
@@ -293,27 +557,162 @@ class DatasetManager {
         recordCount = totalAmount;
         calculationDesc = `SELECT COUNT(*) FROM active_dataset${whereSql}`;
 
-        breakdown = await duckdbManager.all<BreakdownItem>(
-          `SELECT category as entity, SUM(amount) as amount, CAST(COUNT(*) AS INTEGER) as count FROM active_dataset${whereSql} GROUP BY category ORDER BY count DESC`,
-          sqlParams
-        );
+        if (intent.show_table) {
+          breakdown = await duckdbManager.all<BreakdownItem>(
+            `SELECT category as entity, category, SUM(amount) as amount, SUM(amount) as total_amount, CAST(COUNT(*) AS INTEGER) as count, CAST(COUNT(*) AS INTEGER) as record_count FROM active_dataset${whereSql} GROUP BY category ORDER BY count DESC`,
+            sqlParams
+          );
+        } else {
+          breakdown = [];
+        }
       } catch {
         totalAmount = matchingRecords.length;
         recordCount = totalAmount;
         calculationDesc = `COUNT(*)${whereSql}`;
+        breakdown = [];
+      }
+    } else if (intent.operation === 'max') {
+      try {
+        const topRow = await duckdbManager.all<FinancialRecord>(
+          `SELECT id, vendor, category, transaction_date, amount, status, domain, source_file FROM active_dataset${whereSql} ORDER BY amount DESC LIMIT 1`,
+          sqlParams
+        );
+        if (topRow && topRow.length > 0) {
+          const rec = topRow[0];
+          totalAmount = rec.amount;
+          recordCount = 1;
+          calculationDesc = `SELECT MAX(amount) FROM active_dataset${whereSql}`;
+          matchingRecords = [rec];
+          if (intent.show_table && !intent.only_amount) {
+            breakdown = [
+              {
+                entity: `${rec.vendor} (${rec.category || 'Expense'})`,
+                vendor: rec.vendor,
+                category: rec.category,
+                amount: rec.amount,
+                total_amount: rec.amount,
+                count: 1,
+                record_count: 1,
+                status: rec.status,
+              },
+            ];
+          } else {
+            breakdown = [];
+          }
+        } else {
+          totalAmount = 0;
+          recordCount = 0;
+          calculationDesc = `SELECT MAX(amount) FROM active_dataset${whereSql}`;
+          breakdown = [];
+        }
+      } catch {
+        calculationDesc = `SELECT MAX(amount) FROM active_dataset${whereSql}`;
+      }
+    } else if (intent.operation === 'min') {
+      try {
+        const minRow = await duckdbManager.all<FinancialRecord>(
+          `SELECT id, vendor, category, transaction_date, amount, status, domain, source_file FROM active_dataset${whereSql} ORDER BY amount ASC LIMIT 1`,
+          sqlParams
+        );
+        if (minRow && minRow.length > 0) {
+          const rec = minRow[0];
+          totalAmount = rec.amount;
+          recordCount = 1;
+          calculationDesc = `SELECT MIN(amount) FROM active_dataset${whereSql}`;
+          matchingRecords = [rec];
+          if (intent.show_table && !intent.only_amount) {
+            breakdown = [
+              {
+                entity: `${rec.vendor} (${rec.category || 'Expense'})`,
+                vendor: rec.vendor,
+                category: rec.category,
+                amount: rec.amount,
+                total_amount: rec.amount,
+                count: 1,
+                record_count: 1,
+                status: rec.status,
+              },
+            ];
+          } else {
+            breakdown = [];
+          }
+        } else {
+          totalAmount = 0;
+          recordCount = 0;
+          calculationDesc = `SELECT MIN(amount) FROM active_dataset${whereSql}`;
+          breakdown = [];
+        }
+      } catch {
+        calculationDesc = `SELECT MIN(amount) FROM active_dataset${whereSql}`;
+      }
+    } else if (intent.operation === 'avg') {
+      try {
+        const avgRes = await duckdbManager.all<{ avg_amount: number; record_count: number }>(
+          `SELECT COALESCE(AVG(amount), 0) as avg_amount, CAST(COUNT(*) AS INTEGER) as record_count FROM active_dataset${whereSql}`,
+          sqlParams
+        );
+        totalAmount = Math.round((avgRes[0]?.avg_amount || 0) * 100) / 100;
+        recordCount = avgRes[0]?.record_count || matchingRecords.length;
+        calculationDesc = `SELECT AVG(amount) FROM active_dataset${whereSql}`;
+        breakdown = [];
+      } catch {
+        calculationDesc = `SELECT AVG(amount) FROM active_dataset${whereSql}`;
       }
     } else if (intent.operation === 'ranking') {
       const limit = intent.limit || 5;
-      try {
-        breakdown = await duckdbManager.all<BreakdownItem>(
-          `SELECT vendor as entity, SUM(amount) as amount, CAST(COUNT(*) AS INTEGER) as count, ANY_VALUE(category) as category FROM active_dataset${whereSql} GROUP BY vendor ORDER BY amount DESC LIMIT ${limit}`,
-          sqlParams
-        );
-        totalAmount = breakdown.reduce((acc, curr) => acc + (curr.amount || 0), 0);
-        recordCount = breakdown.reduce((acc, curr) => acc + (curr.count || 0), 0);
-        calculationDesc = `SELECT vendor, SUM(amount) AS total_amount FROM active_dataset${whereSql} GROUP BY vendor ORDER BY total_amount DESC LIMIT ${limit}`;
-      } catch {
-        calculationDesc = `SELECT vendor, SUM(amount) FROM active_dataset${whereSql} GROUP BY vendor ORDER BY 2 DESC LIMIT ${limit}`;
+      if (intent.ranking_target === 'transactions') {
+        try {
+          const topTx = await duckdbManager.all<FinancialRecord>(
+            `SELECT id, vendor, category, transaction_date, amount, status, domain, source_file FROM active_dataset${whereSql} ORDER BY amount DESC LIMIT ${limit}`,
+            sqlParams
+          );
+          totalAmount = topTx.reduce((acc, curr) => acc + (curr.amount || 0), 0);
+          recordCount = topTx.length;
+          calculationDesc = `SELECT * FROM active_dataset${whereSql} ORDER BY amount DESC LIMIT ${limit}`;
+          matchingRecords = topTx;
+          if (!intent.only_amount) {
+            breakdown = topTx.map((rec) => ({
+              entity: `${rec.vendor} (${rec.category || 'Expense'})`,
+              vendor: rec.vendor,
+              category: rec.category,
+              amount: rec.amount,
+              total_amount: rec.amount,
+              count: 1,
+              record_count: 1,
+              status: rec.status,
+            }));
+          } else {
+            breakdown = [];
+          }
+        } catch {
+          calculationDesc = `SELECT * FROM active_dataset${whereSql} ORDER BY amount DESC LIMIT ${limit}`;
+        }
+      } else if (intent.ranking_target === 'categories') {
+        try {
+          breakdown = await duckdbManager.all<BreakdownItem>(
+            `SELECT category as entity, category, SUM(amount) as amount, SUM(amount) as total_amount, CAST(COUNT(*) AS INTEGER) as count, CAST(COUNT(*) AS INTEGER) as record_count FROM active_dataset${whereSql} GROUP BY category ORDER BY amount DESC LIMIT ${limit}`,
+            sqlParams
+          );
+          totalAmount = breakdown.reduce((acc, curr) => acc + (curr.amount || 0), 0);
+          recordCount = breakdown.length;
+          calculationDesc = `SELECT category, SUM(amount) AS total_amount FROM active_dataset${whereSql} GROUP BY category ORDER BY total_amount DESC LIMIT ${limit}`;
+          if (intent.only_amount) breakdown = [];
+        } catch {
+          calculationDesc = `SELECT category, SUM(amount) FROM active_dataset${whereSql} GROUP BY category ORDER BY 2 DESC LIMIT ${limit}`;
+        }
+      } else {
+        try {
+          breakdown = await duckdbManager.all<BreakdownItem>(
+            `SELECT vendor as entity, vendor, SUM(amount) as amount, SUM(amount) as total_amount, CAST(COUNT(*) AS INTEGER) as count, CAST(COUNT(*) AS INTEGER) as record_count, ANY_VALUE(category) as category FROM active_dataset${whereSql} GROUP BY vendor ORDER BY amount DESC LIMIT ${limit}`,
+            sqlParams
+          );
+          totalAmount = breakdown.reduce((acc, curr) => acc + (curr.amount || 0), 0);
+          recordCount = breakdown.length;
+          calculationDesc = `SELECT vendor, SUM(amount) AS total_amount FROM active_dataset${whereSql} GROUP BY vendor ORDER BY total_amount DESC LIMIT ${limit}`;
+          if (intent.only_amount) breakdown = [];
+        } catch {
+          calculationDesc = `SELECT vendor, SUM(amount) FROM active_dataset${whereSql} GROUP BY vendor ORDER BY 2 DESC LIMIT ${limit}`;
+        }
       }
     } else if (intent.operation === 'comparison') {
       let rawA = intent.vendor || '';
@@ -330,26 +729,17 @@ class DatasetManager {
       const vA = cleanName(rawA);
       const vB = cleanName(rawB);
 
-      let dateFilterSql = '';
-      if (intent.date_label) {
-        const dClean = intent.date_label.trim().toLowerCase();
-        if (dClean.includes('august') || dClean.includes('aug') || dClean.includes('2026-08')) {
-          dateFilterSql = `AND transaction_date LIKE '2026-08%'`;
-        } else if (dClean.includes('july') || dClean.includes('jul') || dClean.includes('2026-07')) {
-          dateFilterSql = `AND transaction_date LIKE '2026-07%'`;
-        } else if (dClean.includes('june') || dClean.includes('jun') || dClean.includes('2026-06')) {
-          dateFilterSql = `AND transaction_date LIKE '2026-06%'`;
-        }
-      }
+      const comparisonDateCond = buildDateSqlCondition(intent.date_label);
+      const dateFilterSql = comparisonDateCond ? `AND ${comparisonDateCond}` : '';
 
       try {
         const resA = await duckdbManager.all<{ entity: string; amount: number; count: number }>(
-          `SELECT ANY_VALUE(vendor) as entity, COALESCE(SUM(amount), 0) as amount, CAST(COUNT(*) AS INTEGER) as count FROM active_dataset WHERE LOWER(vendor) LIKE ? ${dateFilterSql}`,
-          [`%${vA}%`]
+          `SELECT ANY_VALUE(vendor) as entity, COALESCE(SUM(amount), 0) as amount, CAST(COUNT(*) AS INTEGER) as count FROM active_dataset WHERE (LOWER(vendor) LIKE ? OR REPLACE(LOWER(vendor), '-', '') LIKE ?) ${dateFilterSql}`,
+          [`%${vA}%`, `%${vA.replace(/[\s\-_]/g, '')}%`]
         );
         const resB = await duckdbManager.all<{ entity: string; amount: number; count: number }>(
-          `SELECT ANY_VALUE(vendor) as entity, COALESCE(SUM(amount), 0) as amount, CAST(COUNT(*) AS INTEGER) as count FROM active_dataset WHERE LOWER(vendor) LIKE ? ${dateFilterSql}`,
-          [`%${vB}%`]
+          `SELECT ANY_VALUE(vendor) as entity, COALESCE(SUM(amount), 0) as amount, CAST(COUNT(*) AS INTEGER) as count FROM active_dataset WHERE (LOWER(vendor) LIKE ? OR REPLACE(LOWER(vendor), '-', '') LIKE ?) ${dateFilterSql}`,
+          [`%${vB}%`, `%${vB.replace(/[\s\-_]/g, '')}%`]
         );
 
         const entityNameA = resA[0]?.entity || rawA || 'Entity A';
@@ -360,12 +750,12 @@ class DatasetManager {
         const countB = resB[0]?.count || 0;
 
         breakdown = [
-          { entity: entityNameA, amount: sumA, count: countA },
-          { entity: entityNameB, amount: sumB, count: countB },
+          { entity: entityNameA, vendor: entityNameA, amount: sumA, total_amount: sumA, count: countA, record_count: countA },
+          { entity: entityNameB, vendor: entityNameB, amount: sumB, total_amount: sumB, count: countB, record_count: countB },
         ];
         totalAmount = sumA + sumB;
         recordCount = countA + countB;
-        calculationDesc = `SELECT vendor, SUM(amount) FROM active_dataset WHERE LOWER(vendor) IN ('${vA}', '${vB}') ${dateFilterSql} GROUP BY vendor`;
+        calculationDesc = `SELECT vendor, SUM(amount) FROM active_dataset WHERE (LOWER(vendor) LIKE '%${vA}%' OR LOWER(vendor) LIKE '%${vB}%') ${dateFilterSql} GROUP BY vendor`;
       } catch {
         calculationDesc = `COMPARISON(SUM(amount) for '${rawA}' vs '${rawB}')`;
       }
@@ -373,7 +763,7 @@ class DatasetManager {
       const gbField = intent.group_by === 'vendor' ? 'vendor' : intent.group_by === 'status' ? 'status' : 'category';
       try {
         breakdown = await duckdbManager.all<BreakdownItem>(
-          `SELECT ${gbField} as entity, SUM(amount) as amount, CAST(COUNT(*) AS INTEGER) as count FROM active_dataset${whereSql} GROUP BY ${gbField} ORDER BY amount DESC`,
+          `SELECT ${gbField} as entity, ${gbField} as ${gbField}, SUM(amount) as amount, SUM(amount) as total_amount, CAST(COUNT(*) AS INTEGER) as count, CAST(COUNT(*) AS INTEGER) as record_count FROM active_dataset${whereSql} GROUP BY ${gbField} ORDER BY amount DESC`,
           sqlParams
         );
         totalAmount = breakdown.reduce((acc, cur) => acc + (cur.amount || 0), 0);
@@ -393,14 +783,20 @@ class DatasetManager {
         recordCount = sumRes[0]?.record_count ?? matchingRecords.length;
         calculationDesc = `SELECT SUM(amount) AS total_amount, COUNT(*) AS record_count FROM active_dataset${whereSql}`;
 
-        breakdown = await duckdbManager.all<BreakdownItem>(
-          `SELECT category as entity, SUM(amount) as amount, CAST(COUNT(*) AS INTEGER) as count FROM active_dataset${whereSql} GROUP BY category ORDER BY amount DESC`,
-          sqlParams
-        );
+        // Only compute breakdown table if user explicitly asked for a table or category breakdown
+        if (intent.show_table) {
+          breakdown = await duckdbManager.all<BreakdownItem>(
+            `SELECT category as entity, category, SUM(amount) as amount, SUM(amount) as total_amount, CAST(COUNT(*) AS INTEGER) as count, CAST(COUNT(*) AS INTEGER) as record_count FROM active_dataset${whereSql} GROUP BY category ORDER BY amount DESC`,
+            sqlParams
+          );
+        } else {
+          breakdown = [];
+        }
       } catch {
         totalAmount = matchingRecords.reduce((acc, r) => acc + (r.amount || 0), 0);
         recordCount = matchingRecords.length;
         calculationDesc = `SUM(amount)${whereSql}`;
+        breakdown = [];
       }
     }
 

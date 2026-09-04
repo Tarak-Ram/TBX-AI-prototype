@@ -66,7 +66,15 @@ export const DatasetUploadModal: React.FC<DatasetUploadModalProps> = ({
       setIsDetectingSchema(true);
       try {
         const formData = new FormData();
-        files.forEach((f) => formData.append('files', f));
+        files.forEach((f) => {
+          // If the file is large (> 2MB) and is a CSV, slice the first 512KB for instant schema inspection
+          if (f.name.toLowerCase().endsWith('.csv') && f.size > 2 * 1024 * 1024) {
+            const sampleSlice = f.slice(0, 512 * 1024);
+            formData.append('files', new File([sampleSlice], f.name, { type: 'text/csv' }));
+          } else {
+            formData.append('files', f);
+          }
+        });
 
         const res = await fetch('/dataset/detect-schema', {
           method: 'POST',

@@ -47,6 +47,8 @@ export interface ResponsePayload {
   clarification_options: string[];
   is_unsupported: boolean;
   is_not_found: boolean;
+  only_amount?: boolean;
+  show_table?: boolean;
 }
 
 export interface ChatMessage {

@@ -92,7 +92,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Dataset Status Bento Pill */}
-          {health && (
+          {health && health.active_dataset && health.active_records > 0 ? (
             <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-xl shadow-xs">
               <div className="flex h-2 w-2 relative">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -109,6 +109,16 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
               <span className="text-emerald-400 font-medium">• ₹ INR</span>
             </div>
+          ) : (
+            <button
+              onClick={onOpenUpload}
+              className="flex items-center gap-2 bg-slate-900/90 hover:bg-slate-850 border border-amber-500/40 px-3 py-1.5 rounded-xl shadow-xs cursor-pointer transition text-left"
+              title="Click to upload your dataset"
+            >
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+              <span className="text-amber-300 font-medium">No Dataset Loaded</span>
+              <span className="text-slate-400 text-[10px]">Upload required</span>
+            </button>
           )}
 
           {/* Refresh Action */}

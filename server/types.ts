@@ -10,7 +10,7 @@ export interface FinancialRecord {
 
 export interface FinancialIntent {
   domain: 'transactions' | 'vendor_payouts' | 'reconciliation';
-  operation: 'sum' | 'count' | 'list' | 'ranking' | 'group_by' | 'comparison';
+  operation: 'sum' | 'count' | 'max' | 'min' | 'avg' | 'list' | 'ranking' | 'group_by' | 'comparison' | 'list_categories' | 'list_vendors';
   metric: 'amount' | 'transaction_count';
   vendor: string | null;
   category: string | null;
@@ -20,6 +20,9 @@ export interface FinancialIntent {
   comparison_period: string | null;
   comparison_vendor: string | null;
   limit: number | null;
+  ranking_target?: 'transactions' | 'vendors' | 'categories' | null;
+  only_amount?: boolean;
+  show_table?: boolean;
 }
 
 export interface SupportingRecord {
@@ -63,6 +66,9 @@ export interface BreakdownItem {
   amount: number;
   count: number;
   category?: string;
+  vendor?: string;
+  total_amount?: number;
+  record_count?: number;
   status?: string;
 }
 
@@ -79,4 +85,6 @@ export interface ResponsePayload {
   clarification_options: string[];
   is_unsupported: boolean;
   is_not_found: boolean;
+  only_amount?: boolean;
+  show_table?: boolean;
 }
