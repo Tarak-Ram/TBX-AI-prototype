@@ -1,0 +1,8 @@
+{
+  "name": "Remix TBX Finance Assistant",
+  "description": "Deterministic Financial Query Compiler powered by DuckDB in-memory OLAP, Gemini intent compilation, and multi-file automatic schema understanding for payouts, transactions, and reconciliation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
